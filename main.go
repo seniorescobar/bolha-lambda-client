@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/service/sqs"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -17,17 +18,23 @@ import (
 
 	"github.com/seniorescobar/bolha/client"
 	"github.com/seniorescobar/bolha/lambda/common"
+
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	// TODO get queue by name
+	qURL = "https://sqs.eu-central-1.amazonaws.com/301808156345/bolha-ads-queue"
 )
 
 func Handler(ctx context.Context, event events.SQSEvent) error {
 	sess := session.Must(session.NewSession())
 
-	sqsClient, err := common.NewSQSClient(sess)
-	if err != nil {
-		return err
-	}
-
-	ddb := dynamodb.New(sess)
+	// init aws service clients
+	var (
+		sqsc = sqs.New(sess)
+		ddbc = dynamodb.New(sess)
+	)
 
 	for _, record := range event.Records {
 		var action, username, password string
@@ -47,7 +54,7 @@ func Handler(ctx context.Context, event events.SQSEvent) error {
 		}
 
 		switch action {
-		case common.ActionUpload:
+		case "upload":
 			var ad common.Ad
 			if err := json.Unmarshal([]byte(record.Body), &ad); err != nil {
 				return err
@@ -95,13 +102,13 @@ func Handler(ctx context.Context, event events.SQSEvent) error {
 				UpdateExpression: aws.String("SET AdUploadedId = :uploadedId, AdUploadedAt = :uploadedAt"),
 			}
 
-			if _, err := ddb.UpdateItem(input); err != nil {
+			if _, err := ddbc.UpdateItem(input); err != nil {
 				return err
 			}
 
-			sqsClient.DeleteMessage(record.ReceiptHandle)
+			deleteSQSMessage(sqsc, record.ReceiptHandle)
 
-		case common.ActionRemove:
+		case "remove":
 			uploadedAdId, err := strconv.ParseInt(record.Body, 10, 64)
 			if err != nil {
 				return err
@@ -115,7 +122,7 @@ func Handler(ctx context.Context, event events.SQSEvent) error {
 			// 	return err
 			// }
 
-			sqsClient.DeleteMessage(record.ReceiptHandle)
+			deleteSQSMessage(sqsc, record.ReceiptHandle)
 		}
 	}
 
@@ -133,6 +140,17 @@ func getMessageAttributes(msga map[string]events.SQSMessageAttribute, pairs map[
 	}
 
 	return nil
+}
+
+func deleteSQSMessage(sqsc *sqs.SQS, receiptHandle string) error {
+	log.WithField("receiptHandle", receiptHandle).Info("deleting message from sqs queue")
+
+	_, err := sqsc.DeleteMessage(&sqs.DeleteMessageInput{
+		QueueUrl:      aws.String(qURL),
+		ReceiptHandle: aws.String(receiptHandle),
+	})
+
+	return err
 }
 
 func main() {
