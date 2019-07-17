@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/sqs"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -17,15 +19,23 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 
 	"github.com/seniorescobar/bolha/client"
-	"github.com/seniorescobar/bolha/lambda/common"
 
 	log "github.com/sirupsen/logrus"
 )
 
 const (
 	// TODO get queue by name
-	qURL = "https://sqs.eu-central-1.amazonaws.com/301808156345/bolha-ads-queue"
+	qURL           = "https://sqs.eu-central-1.amazonaws.com/301808156345/bolha-ads-queue"
+	s3ImagesBucket = "bolha-images"
 )
+
+type Ad struct {
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Price       int      `json:"price"`
+	CategoryId  int      `json:"category-id"`
+	Images      []string `json:"images"`
+}
 
 func Handler(ctx context.Context, event events.SQSEvent) error {
 	sess := session.Must(session.NewSession())
@@ -34,6 +44,7 @@ func Handler(ctx context.Context, event events.SQSEvent) error {
 	var (
 		sqsc = sqs.New(sess)
 		ddbc = dynamodb.New(sess)
+		s3c  = s3.New(sess)
 	)
 
 	for _, record := range event.Records {
@@ -55,17 +66,15 @@ func Handler(ctx context.Context, event events.SQSEvent) error {
 
 		switch action {
 		case "upload":
-			var ad common.Ad
+			var ad Ad
 			if err := json.Unmarshal([]byte(record.Body), &ad); err != nil {
 				return err
 			}
 
-			s3Client := common.NewS3Client(sess)
-
 			// TODO add concurrency
 			images := make([]io.Reader, len(ad.Images))
 			for i, imgPath := range ad.Images {
-				img, err := s3Client.DownloadImage(imgPath)
+				img, err := downloadS3Image(s3c, imgPath)
 				if err != nil {
 					return err
 				}
@@ -151,6 +160,24 @@ func deleteSQSMessage(sqsc *sqs.SQS, receiptHandle string) error {
 	})
 
 	return err
+}
+
+func downloadS3Image(s3c *s3.S3, imgKey string) (io.Reader, error) {
+	log.WithField("imgKey", imgKey).Info("downloading image from s3")
+
+	buff := new(aws.WriteAtBuffer)
+
+	_, err := s3c.downloader.Download(buff, &s3.GetObjectInput{
+		Bucket: aws.String(s3ImagesBucket),
+		Key:    aws.String(imgKey),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	imgBytes := buff.Bytes()
+
+	return bytes.NewReader(imgBytes), nil
 }
 
 func main() {
